@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live valuation</title>
+<style>
+  :root{
+    --ink:#172B4D; --sub:#44546F; --line:#DFE1E6; --bg:#FFFFFF;
+    --up:#22A06B; --down:#C9372C; --amber:#974F0C; --amber-bg:#FFF7D6;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:transparent;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink);-webkit-font-smoothing:antialiased;}
+  .card{width:100%;padding:16px 18px;}
+  .top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;
+    padding-bottom:14px;border-bottom:1px solid var(--line);}
+  .tkr{font-size:16px;font-weight:700;letter-spacing:.02em}
+  .co{font-size:12px;color:var(--sub);margin-top:2px;max-width:320px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .price{font-size:30px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
+  .chg{font-size:13px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
+  .up{color:var(--up)} .down{color:var(--down)}
+  .meta{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--sub);margin-top:8px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--up);display:inline-block}
+  @media (prefers-reduced-motion: no-preference){
+    .dot.live{animation:pulse 2s ease-in-out infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  }
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:1px;background:var(--line);border:1px solid var(--line);border-radius:8px;
+    overflow:hidden;margin-top:14px}
+  .tile{background:var(--bg);padding:12px 14px;min-height:62px}
+  .tile .k{font-size:11.5px;color:var(--sub)}
+  .tile .v{font-size:18px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums}
+  .tile .read{font-size:10.5px;color:var(--sub);margin-top:2px;line-height:1.3}
+  .note{margin-top:14px;font-size:11px;color:var(--sub);line-height:1.5}
+  .badge{display:inline-block;font-size:11px;font-weight:600;color:var(--amber);
+    background:var(--amber-bg);border-radius:4px;padding:2px 8px;margin-top:10px}
+  .skeleton{color:var(--sub);font-weight:400}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="top">
+      <div>
+        <div class="tkr" id="tkr">—</div>
+        <div class="co" id="co"></div>
+        <div class="meta"><span class="dot" id="dot"></span><span id="status">Loading…</span></div>
+      </div>
+      <div style="text-align:right">
+        <div class="price skeleton" id="price">—</div>
+        <div class="chg" id="chg"></div>
+      </div>
+    </div>
+    <div class="grid" id="metrics"></div>
+    <div id="badge"></div>
+    <div class="note" id="note"></div>
+  </div>
+
+<script>
+/* ============================================================
+   ONE widget for every stock. Pass the ticker in the URL:
+       stock-live-valuation.html?ticker=NVDA
+   Each Confluence page embeds this same file with its own ?ticker=.
+
+   Load is SPREAD across three free APIs — one call each — so no single
+   provider's rate limit gets hit:
+     • Twelve Data   -> price, change, name, 52-week range   (twelvedata.com)
+     • Finnhub       -> P/E, P/S, P/B                        (finnhub.io)
+     • Alpha Vantage -> forward P/E, PEG, EV/EBITDA, EV, yield (alphavantage.co)
+
+   SETUP: paste your three free keys below. Any you leave blank just means
+   those fields show "—". All three blank = demo mode.
+   ============================================================ */
+const KEYS = {
+  twelve:  "fd3b7b92606a4746a92d00080afc2742",   // Twelve Data key
+  finnhub: "d8vf4jpr01qgrv4nnf5gd8vf4jpr01qgrv4nnf60",   // Finnhub key
+  alpha:   "L6EMIZJWYX0WZBT0"    // Alpha Vantage key
+};
+/* ---- read ticker from the URL (required) ---- */
+const params = new URLSearchParams(location.search);
+const TICKER = (params.get("ticker") || params.get("symbol") || "")
+                 .toUpperCase().trim();
+
+/* ---- helpers ---- */
+const n = v => { const x = Number(v); return Number.isFinite(x) ? x : null; };
+const dash = "\u2014";
+const fmtMoney = v => {
+  if (v === null) return dash;
+  const a = Math.abs(v);
+  if (a >= 1e12) return "$" + (v/1e12).toFixed(2) + "T";
+  if (a >= 1e9)  return "$" + (v/1e9).toFixed(1) + "B";
+  if (a >= 1e6)  return "$" + (v/1e6).toFixed(1) + "M";
+  return "$" + v.toFixed(0);
+};
+const fmtMult  = v => v === null ? dash : (Math.abs(v) >= 100 ? Math.round(v) : v.toFixed(1)) + "x";
+const fmtNum   = v => v === null ? dash : v.toFixed(1);
+const fmtPct   = v => v === null ? dash : (v*100).toFixed(2) + "%";
+const fmtPrice = v => v === null ? dash : "$" + v.toFixed(2);
+
+/* ============================================================
+   DATA SOURCE — three providers, one call each, fired in parallel.
+   Each returns part of the picture; any failure just leaves "—".
+   Returns one flat object the renderer understands.
+   ============================================================ */
+async function fetchStock(symbol, keys){
+  const j = u => fetch(u).then(r => r.json());
+  const safe = p => p.then(v => v).catch(() => ({}));   // a dead provider -> {}
+
+  const [td, fh, av] = await Promise.all([
+    keys.twelve  ? safe(j(`https://api.twelvedata.com/quote?symbol=${symbol}&apikey=${keys.twelve}`))                  : Promise.resolve({}),
+    keys.finnhub ? safe(j(`https://finnhub.io/api/v1/stock/metric?symbol=${symbol}&metric=all&token=${keys.finnhub}`)) : Promise.resolve({}),
+    keys.alpha   ? safe(j(`https://www.alphavantage.co/query?function=OVERVIEW&symbol=${symbol}&apikey=${keys.alpha}`)) : Promise.resolve({})
+  ]);
+
+  const m = fh.metric || {};                            // Finnhub basic financials
+  const avNotice = av.Information || av.Note || null;    // Alpha Vantage rate-limit message
+  const evToRev = n(av.EVToRevenue), revTtm = n(av.RevenueTTM);
+
+  return {
+    // Twelve Data — basic info
+    name:       td.name || av.Name || symbol,
+    price:      n(td.close ?? td.price),
+    changePct:  n(td.percent_change),
+    low52:      n(td.fifty_two_week?.low)  ?? n(av["52WeekLow"]),
+    high52:     n(td.fifty_two_week?.high) ?? n(av["52WeekHigh"]),
+    // Finnhub — trailing ratios
+    peTrailing: n(m.peTTM ?? m.peBasicExclExtraTTM ?? m.peNormalizedAnnual),
+    ps:         n(m.psTTM),
+    pb:         n(m.pbQuarterly ?? m.pbAnnual),
+    // Alpha Vantage — the rest
+    marketCap:  n(av.MarketCapitalization),
+    ev:         (evToRev !== null && revTtm !== null) ? evToRev * revTtm : null,
+    peForward:  n(av.ForwardPE),
+    peg:        n(av.PEGRatio),
+    evEbitda:   n(av.EVToEBITDA),
+    divYield:   n(av.DividendYield),
+    notice:     avNotice
+  };
+}
+
+/* ---- demo sample so the layout renders without keys ---- */
+const DEMO = {
+  TSLA:{ name:"Tesla, Inc. (sample)", price:370.80, changePct:null, low52:288.77, high52:498.83,
+         marketCap:1.393e12, ev:1.358e12, peTrailing:364, peForward:174, peg:3.8,
+         ps:14.2, evEbitda:122, pb:16.4, divYield:0, notice:null }
+};
+
+/* ---- render ---- */
+function render(d, live){
+  document.getElementById("tkr").textContent = TICKER;
+  document.getElementById("co").textContent  = d.name || "";
+  const priceEl = document.getElementById("price");
+  priceEl.classList.remove("skeleton");
+  priceEl.textContent = fmtPrice(d.price);
+
+  if (d.changePct !== null){
+    const up = d.changePct >= 0, el = document.getElementById("chg");
+    el.className = "chg " + (up ? "up" : "down");
+    el.textContent = (up ? "\u25B2 +" : "\u25BC ") + d.changePct.toFixed(2) + "%";
+  }
+
+  const tiles = [
+    ["Market cap",       fmtMoney(d.marketCap), ""],
+    ["Enterprise value", fmtMoney(d.ev), ""],
+    ["P/E \u2014 trailing", fmtMult(d.peTrailing), "vs market ~20\u201325x"],
+    ["P/E \u2014 forward",  fmtMult(d.peForward), "est. next-12-mo EPS"],
+    ["PEG ratio",        fmtNum(d.peg), "~1 = fair, growth-adj."],
+    ["Price / sales",    fmtMult(d.ps), ""],
+    ["EV / EBITDA",      fmtMult(d.evEbitda), "cross-company multiple"],
+    ["Price / book",     fmtMult(d.pb), ""],
+    ["Dividend yield",   fmtPct(d.divYield), ""]
+  ];
+  document.getElementById("metrics").innerHTML = tiles.map(([k,v,r]) =>
+    `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div>${r?`<div class="read">${r}</div>`:""}</div>`
+  ).join("");
+
+  const t = new Date().toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  const rng = (d.low52 !== null && d.high52 !== null)
+    ? `52-wk $${d.low52.toFixed(0)} \u2013 $${d.high52.toFixed(0)}` : "";
+  const dot = document.getElementById("dot");
+  dot.className = live ? "dot live" : "dot";
+  if (!live) dot.style.background = "var(--amber)";
+  document.getElementById("status").textContent =
+    (live ? "Live \u00B7 fetched " : "Static demo \u00B7 ") + t + (rng ? " \u00B7 " + rng : "");
+
+  document.getElementById("note").textContent = live
+    ? "Sources: Twelve Data (price, 52-wk) \u00B7 Finnhub (P/E, P/S, P/B) \u00B7 Alpha Vantage (forward P/E, PEG, EV/EBITDA). Pulled on page open. Not investment advice."
+    : "Sample data; valuation pulled fresh on page open. Not investment advice.";
+}
+
+/* ---- run on open ---- */
+(async function(){
+  if (!TICKER){
+    document.getElementById("tkr").textContent = dash;
+    document.getElementById("price").classList.remove("skeleton");
+    document.getElementById("price").textContent = dash;
+    const dot = document.getElementById("dot");
+    dot.className = "dot";
+    dot.style.background = "var(--down)";
+    document.getElementById("status").textContent = "No ticker specified";
+    document.getElementById("badge").innerHTML =
+      `<span class="badge">Missing ticker — add <b>?ticker=SYMBOL</b> to the URL (e.g. ?ticker=NVDA)</span>`;
+    return;
+  }
+  const anyKey = KEYS.twelve || KEYS.finnhub || KEYS.alpha;
+  if (!anyKey){
+    const d = DEMO[TICKER] || { name:"", price:null, changePct:null,
+      marketCap:null, ev:null, peTrailing:null, peForward:null, peg:null,
+      ps:null, evEbitda:null, pb:null, divYield:null, notice:null };
+    render(d, false);
+    document.getElementById("badge").innerHTML =
+      `<span class="badge">Demo mode \u2014 add your three free keys in the config to load live ${TICKER} data</span>`;
+    return;
+  }
+  try{
+    const d = await fetchStock(TICKER, KEYS);
+    if (d.price === null && d.peTrailing === null && d.marketCap === null){
+      throw new Error("no data from any source \u2014 check your keys, the ticker, and that you're serving over http");
+    }
+    render(d, true);
+    if (d.notice){
+      document.getElementById("badge").innerHTML =
+        `<span class="badge">Alpha Vantage: ${d.notice} \u2014 forward P/E, PEG & EV/EBITDA may be blank until it resets.</span>`;
+    }
+  }catch(err){
+    document.getElementById("tkr").textContent = TICKER;
+    document.getElementById("price").classList.remove("skeleton");
+    document.getElementById("price").textContent = dash;
+    document.getElementById("status").textContent = "Couldn't load data";
+    document.getElementById("badge").innerHTML =
+      `<span class="badge">Couldn't load ${TICKER} \u2014 ${String(err.message||err)}</span>`;
+  }
+})();
+</script>
+</body>
+</html>
