@@ -35,9 +35,13 @@
   .pill{display:inline-block;min-width:46px;padding:2px 8px;border-radius:999px;
     color:#fff;font-weight:700;font-size:12.5px;text-align:center}
   .sigcell{white-space:normal}
-  .sig{display:inline-block;padding:2px 8px;border-radius:999px;
+  .sig{display:inline-block;padding:2px 8px;border:1px solid transparent;border-radius:999px;
     color:#fff;font-weight:700;font-size:11.5px;white-space:nowrap;margin:1px 0 1px 4px}
   .sig.bull{background:var(--up)} .sig.bear{background:var(--down)}
+  /* developing (current week, may repaint) = hollow pill */
+  .sig.dev{background:transparent}
+  .sig.bull.dev{color:var(--up);border-color:var(--up)}
+  .sig.bear.dev{color:var(--down);border-color:var(--down)}
   .legend{margin-top:12px;font-size:11px;color:var(--sub);line-height:1.6}
   .swatch{display:inline-block;width:120px;height:8px;border-radius:4px;vertical-align:middle;
     margin:0 6px;background:linear-gradient(90deg,
@@ -75,6 +79,7 @@
       Day / MoM / YoY are price change vs the previous close, ~1&nbsp;month and ~12&nbsp;months ago.
       <br><b>Bull signals:</b> <span class="sig bull">&#9650; Bull div</span>
       <br><b>Bear signals:</b> <span class="sig bear">&#9660; Bear div</span>
+      <br>Solid = confirmed pivot &middot; hollow = developing (current week, may repaint).
       <br>Twelve&nbsp;Data, daily candles (weekly RSI resampled) &middot; loaded in batches of 8 (free-tier limit) &middot; not investment advice.
     </div>
   </div>
@@ -149,43 +154,64 @@ function pivots(vals, dir, span = 2){
   return idx;
 }
 
-// Regular bullish divergence: the two most recent weekly swing lows show price
-// making a LOWER low while RSI makes a HIGHER low (fading downside momentum).
-// Conservative: latest low must be recent, lows sensibly spaced, RSI in lower half.
-function bullishDivergence(closes, rsiArr){
-  const lows = pivots(closes, -1, 2);
-  if (lows.length < 2) return false;
-  const a = lows[lows.length - 2], b = lows[lows.length - 1];
-  if (closes.length - 1 - b > 8) return false;     // latest swing low must be recent (~2 months)
-  const gap = b - a;
-  if (gap < 3 || gap > 30) return false;           // sensible spacing between the two lows
-  if (rsiArr[a] == null || rsiArr[b] == null) return false;
-  return closes[b] < closes[a]      // lower low in price
-      && rsiArr[b] > rsiArr[a]      // higher low in RSI
-      && rsiArr[a] < 50;            // in the lower half, where it's meaningful
-}
+/* ---- regular RSI divergence ----------------------------------------------
+   dir = -1 → bullish (compare swing LOWS): price lower low + RSI higher low.
+   dir = +1 → bearish (compare swing HIGHS): price higher high + RSI lower high.
 
-// Regular bearish divergence: the two most recent weekly swing highs show price
-// making a HIGHER high while RSI makes a LOWER high (fading upside momentum).
-function bearishDivergence(closes, rsiArr){
-  const highs = pivots(closes, +1, 2);
-  if (highs.length < 2) return false;
-  const a = highs[highs.length - 2], b = highs[highs.length - 1];
-  if (closes.length - 1 - b > 8) return false;     // latest swing high must be recent (~2 months)
-  const gap = b - a;
-  if (gap < 3 || gap > 30) return false;           // sensible spacing between the two highs
-  if (rsiArr[a] == null || rsiArr[b] == null) return false;
-  return closes[b] > closes[a]      // higher high in price
-      && rsiArr[b] < rsiArr[a]      // lower high in RSI
-      && rsiArr[a] > 50;            // in the upper half, where it's meaningful
+   A "second leg" (b) is matched against an EARLIER pivot (a) — not just the
+   adjacent one — within a sensible spacing, so divergences that skip an
+   intermediate pivot still count. Two flavours of second leg:
+     • confirmed  — b is a finished pivot (the V/Λ has printed). Stable.
+     • developing — b is the CURRENT bar still making a fresh extreme (no V yet).
+                    Matches what you see live, but can repaint until the week closes.
+   Returns {dev:false|true} or null. Confirmed is preferred over developing.    */
+const RECENT_WEEKS = 16;     // how recent the second leg must be (was 8)
+const MIN_GAP = 3, MAX_GAP = 30;   // spacing between the two legs, in weeks
+
+function divergence(closes, rsiArr, dir){
+  const piv = pivots(closes, dir, 2);
+  const last = closes.length - 1;
+  if (last < 2) return null;
+  const region   = a => dir < 0 ? rsiArr[a] < 50 : rsiArr[a] > 50;  // where it matters
+  const priceDiv = (a, b) => dir < 0 ? closes[b] < closes[a] : closes[b] > closes[a];
+  const rsiDiv   = (a, b) => dir < 0 ? rsiArr[b] > rsiArr[a] : rsiArr[b] < rsiArr[a];
+
+  // does leg b diverge against any earlier confirmed pivot a (non-adjacent ok)?
+  function matches(b){
+    if (rsiArr[b] == null) return false;
+    for (let k = piv.length - 1; k >= 0; k--){
+      const a = piv[k];
+      if (a >= b) continue;
+      const gap = b - a;
+      if (gap < MIN_GAP || gap > MAX_GAP) continue;
+      if (rsiArr[a] == null) continue;
+      if (priceDiv(a, b) && rsiDiv(a, b) && region(a)) return true;
+    }
+    return false;
+  }
+
+  // 1) confirmed: newest pivot within the recency window that diverges
+  for (let k = piv.length - 1; k >= 0; k--){
+    if (last - piv[k] > RECENT_WEEKS) break;        // pivots ascending → rest are older
+    if (matches(piv[k])) return { dev: false };
+  }
+  // 2) developing: current bar making a fresh extreme vs the prior two weeks
+  const fresh = dir < 0
+    ? (closes[last] < closes[last - 1] && closes[last] < closes[last - 2])
+    : (closes[last] > closes[last - 1] && closes[last] > closes[last - 2]);
+  if (fresh && matches(last)) return { dev: true };
+
+  return null;
 }
 
 // The stack of TA signals we track on a name. Add new detectors here and they
 // will accumulate as pills in the Signal column — more pills = more confluence.
 function signals(closes, rsiArr){
   const out = [];
-  if (bullishDivergence(closes, rsiArr)) out.push({ label: "▲ Bull div", kind: "bull" });
-  if (bearishDivergence(closes, rsiArr)) out.push({ label: "▼ Bear div", kind: "bear" });
+  const bull = divergence(closes, rsiArr, -1);
+  if (bull) out.push({ label: "▲ Bull div", kind: "bull", dev: bull.dev });
+  const bear = divergence(closes, rsiArr, +1);
+  if (bear) out.push({ label: "▼ Bear div", kind: "bear", dev: bear.dev });
   return out;
 }
 
@@ -272,7 +298,9 @@ function rowCells(sym, bars){
     : `<td><span class="pill" style="background:${rsiColor(r)}">${r.toFixed(0)}</span></td>`;
   const sigs = signals(wk, rs);
   const sigCell = sigs.length
-    ? `<td class="sigcell">${sigs.map(s => `<span class="sig ${s.kind}">${s.label}</span>`).join("")}</td>`
+    ? `<td class="sigcell">${sigs.map(s =>
+        `<span class="sig ${s.kind}${s.dev ? " dev" : ""}" title="${s.dev ? "developing — current week, may repaint" : "confirmed"}">${s.label}</span>`
+      ).join("")}</td>`
     : `<td class="mut">${dash}</td>`;
   return `<td class="l sym">${sym}</td>` +
     `<td class="price">${fmtPrice(price)}</td>` +
