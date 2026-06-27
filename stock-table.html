@@ -91,10 +91,12 @@
    ============================================================ */
 const KEY = "fd3b7b92606a4746a92d00080afc2742";   // Twelve Data key (shared)
 
-/* ---- read tickers from the URL ---- */
+/* ---- read tickers from the URL (de-duplicated, order preserved) ---- */
 const params = new URLSearchParams(location.search);
-const TICKERS = (params.get("tickers") || params.get("symbols") || params.get("ticker") || "")
-  .split(",").map(s => s.toUpperCase().trim()).filter(Boolean);
+const TICKERS = [...new Set(
+  (params.get("tickers") || params.get("symbols") || params.get("ticker") || "")
+    .split(",").map(s => s.toUpperCase().trim()).filter(Boolean)
+)];
 
 const dash = "—";
 
