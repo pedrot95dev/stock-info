@@ -54,6 +54,7 @@
         <tr>
           <th class="l">Ticker</th>
           <th>Price</th>
+          <th>Day&nbsp;%</th>
           <th>MoM&nbsp;%</th>
           <th>YoY&nbsp;%</th>
           <th>Weekly&nbsp;RSI</th>
@@ -64,9 +65,9 @@
     <div id="badge"></div>
     <div class="legend">
       <b>RSI(14), weekly.</b> <span class="swatch"></span>
-      &lt;30 oversold (green / buy zone) &middot; &gt;70 overbought (red / sell zone).
-      MoM &amp; YoY are price change vs ~1&nbsp;month and ~12&nbsp;months ago.
-      <br>Twelve&nbsp;Data, weekly candles &middot; loaded in batches of 8 (free-tier limit) &middot; not investment advice.
+      &lt;30 oversold (green / buy zone) &middot; &gt;80 overbought (red / sell zone).
+      Day / MoM / YoY are price change vs the previous close, ~1&nbsp;month and ~12&nbsp;months ago.
+      <br>Twelve&nbsp;Data, daily candles (weekly RSI resampled) &middot; loaded in batches of 8 (free-tier limit) &middot; not investment advice.
     </div>
   </div>
 
@@ -76,13 +77,14 @@
        stock-table.html?tickers=AAPL,MSFT,NVDA
    (also accepts ?symbols= or ?ticker=)
 
-   ONE HTTP request for the whole table: Twelve Data /time_series accepts
-   comma-separated symbols and returns weekly candles for each. From those
-   weekly closes we derive, client-side:
-       • Price      = latest weekly close
+   ONE request per batch: Twelve Data /time_series accepts comma-separated
+   symbols and returns daily candles for each. From those daily closes we
+   derive, client-side:
+       • Price      = latest daily close
+       • Day %      = vs the previous daily close
        • MoM %      = vs the close ~30 days ago
        • YoY %      = vs the close ~365 days ago
-       • Weekly RSI = RSI(14, Wilder) over the weekly closes
+       • Weekly RSI = RSI(14, Wilder) over weekly closes (daily resampled to weeks)
 
    Why Twelve Data and not Finnhub: Finnhub's free tier no longer serves
    historical candles and its RSI endpoint is premium, so it can't cover
@@ -119,6 +121,21 @@ function rsi(closes, period = 14){
   return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
+// Resample chronological daily bars to one close per ISO week (last close wins).
+function toWeekly(bars){
+  const byWeek = new Map();
+  for (const b of bars){
+    const d = new Date(b.t);
+    const u = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    const day = u.getUTCDay() || 7;                 // Mon=1..Sun=7
+    u.setUTCDate(u.getUTCDate() + 4 - day);         // shift to the week's Thursday
+    const yearStart = Date.UTC(u.getUTCFullYear(), 0, 1);
+    const week = Math.ceil(((u - yearStart) / 86400000 + 1) / 7);
+    byWeek.set(u.getUTCFullYear() * 100 + week, b.c);  // later bar overwrites -> last close
+  }
+  return [...byWeek.values()];                       // chronological (Map keeps insert order)
+}
+
 // Close from the bar whose date is nearest to `daysBack` before the latest bar.
 function closeDaysAgo(bars, daysBack){
   const target = bars[bars.length - 1].t - daysBack * 86400000;
@@ -130,9 +147,9 @@ function closeDaysAgo(bars, daysBack){
   return best ? best.c : null;
 }
 
-// RSI -> colour: green at <=30, red at >=70, smooth gradient in between.
+// RSI -> colour: green at <=30, red at >=80, smooth gradient in between.
 function rsiColor(v){
-  const t = Math.max(0, Math.min(1, (v - 30) / 40));   // 0 at 30, 1 at 70
+  const t = Math.max(0, Math.min(1, (v - 30) / 50));   // 0 at 30, 1 at 80
   const hue = 145 * (1 - t);                            // 145=green -> 0=red
   return `hsl(${hue.toFixed(0)},62%,${(46 - t * 4).toFixed(0)}%)`;
 }
@@ -170,18 +187,19 @@ function parseSeries(json, tickers){
 function rowCells(sym, bars){
   if (!bars){
     return `<td class="l sym">${sym}</td>` +
-      `<td class="mut" colspan="4">no data — check the symbol</td>`;
+      `<td class="mut" colspan="5">no data — check the symbol</td>`;
   }
   const price = bars[bars.length - 1].c;
+  const day = bars.length > 1 ? (price / bars[bars.length - 2].c - 1) * 100 : null;
   const mom = (() => { const p = closeDaysAgo(bars, 30);  return p ? (price / p - 1) * 100 : null; })();
   const yoy = (() => { const p = closeDaysAgo(bars, 365); return p ? (price / p - 1) * 100 : null; })();
-  const r = rsi(bars.map(b => b.c));
+  const r = rsi(toWeekly(bars));
   const rsiCell = r === null
     ? `<td class="mut">${dash}</td>`
     : `<td><span class="pill" style="background:${rsiColor(r)}">${r.toFixed(0)}</span></td>`;
   return `<td class="l sym">${sym}</td>` +
     `<td class="price">${fmtPrice(price)}</td>` +
-    pctCell(mom) + pctCell(yoy) + rsiCell;
+    pctCell(day) + pctCell(mom) + pctCell(yoy) + rsiCell;
 }
 
 /* ---- rate-limit plumbing ---- */
@@ -213,7 +231,7 @@ function cooldown(sec, label){
 async function fetchChunk(syms){
   const url = `https://api.twelvedata.com/time_series` +
     `?symbol=${encodeURIComponent(syms.join(","))}` +
-    `&interval=1week&outputsize=60&apikey=${KEY}`;
+    `&interval=1day&outputsize=400&apikey=${KEY}`;   // ~1.5y of daily bars; weekly resampled for RSI
   const json = await fetch(url).then(r => r.json());
   if (isRateLimited(json)) return null;
   if (json.status === "error" && !json.meta && !syms.every(s => json[s])){
@@ -253,7 +271,7 @@ async function loadChunk(syms, idxBase){
   // Lay down a stable, ordered row per ticker; fill each in as its batch lands.
   rowsEl.innerHTML = TICKERS.map((s, i) =>
     `<tr id="row-${i}" class="skeleton"><td class="l sym">${s}</td>` +
-    `<td class="mut" colspan="4">loading…</td></tr>`).join("");
+    `<td class="mut" colspan="5">loading…</td></tr>`).join("");
 
   // Split into batches of 8 and load them one after another.
   const chunks = [];
