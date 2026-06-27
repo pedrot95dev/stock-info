@@ -37,7 +37,8 @@
   .legend{margin-top:12px;font-size:11px;color:var(--sub);line-height:1.6}
   .swatch{display:inline-block;width:120px;height:8px;border-radius:4px;vertical-align:middle;
     margin:0 6px;background:linear-gradient(90deg,
-      hsl(145,62%,42%),hsl(73,62%,42%),hsl(0,62%,46%))}
+      hsl(145,68%,45%) 0%,hsl(85,68%,45%) 18%,hsl(55,68%,46%) 36%,
+      hsl(25,68%,45%) 68%,hsl(0,68%,43%) 100%)}
   .badge{display:inline-block;font-size:11px;font-weight:600;color:var(--amber);
     background:var(--amber-bg);border-radius:4px;padding:3px 9px;margin-top:10px}
   .skeleton td{color:var(--sub)}
@@ -147,11 +148,14 @@ function closeDaysAgo(bars, daysBack){
   return best ? best.c : null;
 }
 
-// RSI -> colour: green at <=30, red at >=80, smooth gradient in between.
+// RSI -> colour: green at <=30, red at >=80. The shift is eased (sqrt) so values
+// separate quickly off the 30 floor — 38 reads clearly yellow-green vs 28's green
+// — instead of crawling through near-identical greens across the band.
 function rsiColor(v){
-  const t = Math.max(0, Math.min(1, (v - 30) / 50));   // 0 at 30, 1 at 80
-  const hue = 145 * (1 - t);                            // 145=green -> 0=red
-  return `hsl(${hue.toFixed(0)},62%,${(46 - t * 4).toFixed(0)}%)`;
+  const n = Math.max(0, Math.min(1, (v - 30) / 50));   // 0 at 30, 1 at 80
+  const e = Math.sqrt(n);                               // accelerate early so low values are distinct
+  const hue = 145 * (1 - e);                            // 145=green -> ~55 yellow (low-mid) -> 0=red
+  return `hsl(${hue.toFixed(0)},68%,${(47 - e * 5).toFixed(0)}%)`;
 }
 
 /* ---- formatting ---- */
