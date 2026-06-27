@@ -140,8 +140,9 @@ function pivots(vals, dir, span = 2){
     let ok = true;
     for (let j = i - span; j <= i + span; j++){
       if (j === i) continue;
-      // for a low: neighbour must be > value; for a high: neighbour must be < value
-      if (vals[j] == null || dir * (vals[j] - vals[i]) <= 0){ ok = false; break; }
+      // for a low (dir=-1): every neighbour must be strictly higher; for a high
+      // (dir=+1): strictly lower. Otherwise this isn't a pivot — bail.
+      if (vals[j] == null || dir * (vals[j] - vals[i]) >= 0){ ok = false; break; }
     }
     if (ok) idx.push(i);
   }
