@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stock table</title>
+<style>
+  :root{
+    --ink:#172B4D; --sub:#44546F; --line:#DFE1E6; --bg:#FFFFFF; --zebra:#F7F8FA;
+    --up:#22A06B; --down:#C9372C; --amber:#974F0C; --amber-bg:#FFF7D6;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:transparent;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--ink);-webkit-font-smoothing:antialiased;}
+  .card{width:100%;padding:14px 16px;}
+  .head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:10px}
+  .head h1{font-size:14px;font-weight:700;margin:0;letter-spacing:.02em}
+  .head .meta{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--sub)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--up);display:inline-block}
+  @media (prefers-reduced-motion: no-preference){
+    .dot.live{animation:pulse 2s ease-in-out infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  }
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  thead th{font-size:11px;color:var(--sub);font-weight:600;text-align:right;
+    padding:8px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+  thead th.l{text-align:left}
+  tbody td{font-size:13.5px;padding:9px 12px;text-align:right;border-bottom:1px solid var(--line)}
+  tbody td.l{text-align:left}
+  tbody tr:nth-child(even){background:var(--zebra)}
+  .sym{font-weight:700;letter-spacing:.02em}
+  .price{font-weight:600}
+  .up{color:var(--up)} .down{color:var(--down)} .mut{color:var(--sub)}
+  .pill{display:inline-block;min-width:46px;padding:2px 8px;border-radius:999px;
+    color:#fff;font-weight:700;font-size:12.5px;text-align:center}
+  .legend{margin-top:12px;font-size:11px;color:var(--sub);line-height:1.6}
+  .swatch{display:inline-block;width:120px;height:8px;border-radius:4px;vertical-align:middle;
+    margin:0 6px;background:linear-gradient(90deg,
+      hsl(145,62%,42%),hsl(73,62%,42%),hsl(0,62%,46%))}
+  .badge{display:inline-block;font-size:11px;font-weight:600;color:var(--amber);
+    background:var(--amber-bg);border-radius:4px;padding:3px 9px;margin-top:10px}
+  .skeleton td{color:var(--sub)}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="head">
+      <h1 id="title">Watchlist</h1>
+      <div class="meta"><span class="dot" id="dot"></span><span id="status">Loading…</span></div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th class="l">Ticker</th>
+          <th>Price</th>
+          <th>MoM&nbsp;%</th>
+          <th>YoY&nbsp;%</th>
+          <th>Weekly&nbsp;RSI</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="badge"></div>
+    <div class="legend">
+      <b>RSI(14), weekly.</b> <span class="swatch"></span>
+      &lt;30 oversold (green / buy zone) &middot; &gt;70 overbought (red / sell zone).
+      MoM &amp; YoY are price change vs ~1&nbsp;month and ~12&nbsp;months ago.
+      <br>One Twelve&nbsp;Data request &middot; pulled on page open &middot; not investment advice.
+    </div>
+  </div>
+
+<script>
+/* ============================================================
+   MULTI-TICKER TABLE. Pass tickers in the URL (comma-separated):
+       stock-table.html?tickers=AAPL,MSFT,NVDA
+   (also accepts ?symbols= or ?ticker=)
+
+   ONE HTTP request for the whole table: Twelve Data /time_series accepts
+   comma-separated symbols and returns weekly candles for each. From those
+   weekly closes we derive, client-side:
+       • Price      = latest weekly close
+       • MoM %      = vs the close ~30 days ago
+       • YoY %      = vs the close ~365 days ago
+       • Weekly RSI = RSI(14, Wilder) over the weekly closes
+
+   Why Twelve Data and not Finnhub: Finnhub's free tier no longer serves
+   historical candles and its RSI endpoint is premium, so it can't cover
+   this. Twelve Data's free tier does, and batches all symbols in one call.
+   Free-tier budget: 8 credits/min (1 per symbol) — so ~8 tickers at a time.
+   ============================================================ */
+const KEY = "fd3b7b92606a4746a92d00080afc2742";   // Twelve Data key (shared)
+
+/* ---- read tickers from the URL ---- */
+const params = new URLSearchParams(location.search);
+const TICKERS = (params.get("tickers") || params.get("symbols") || params.get("ticker") || "")
+  .split(",").map(s => s.toUpperCase().trim()).filter(Boolean);
+
+const dash = "—";
+
+/* ---- math ---- */
+// Wilder's RSI over an array of closes in chronological (oldest->newest) order.
+function rsi(closes, period = 14){
+  if (closes.length < period + 1) return null;
+  let gain = 0, loss = 0;
+  for (let i = 1; i <= period; i++){
+    const ch = closes[i] - closes[i - 1];
+    if (ch >= 0) gain += ch; else loss -= ch;
+  }
+  let avgGain = gain / period, avgLoss = loss / period;
+  for (let i = period + 1; i < closes.length; i++){
+    const ch = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + (ch > 0 ? ch : 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + (ch < 0 ? -ch : 0)) / period;
+  }
+  if (avgLoss === 0) return 100;
+  return 100 - 100 / (1 + avgGain / avgLoss);
+}
+
+// Close from the bar whose date is nearest to `daysBack` before the latest bar.
+function closeDaysAgo(bars, daysBack){
+  const target = bars[bars.length - 1].t - daysBack * 86400000;
+  let best = null, bestDiff = Infinity;
+  for (const b of bars){
+    const diff = Math.abs(b.t - target);
+    if (diff < bestDiff){ bestDiff = diff; best = b; }
+  }
+  return best ? best.c : null;
+}
+
+// RSI -> colour: green at <=30, red at >=70, smooth gradient in between.
+function rsiColor(v){
+  const t = Math.max(0, Math.min(1, (v - 30) / 40));   // 0 at 30, 1 at 70
+  const hue = 145 * (1 - t);                            // 145=green -> 0=red
+  return `hsl(${hue.toFixed(0)},62%,${(46 - t * 4).toFixed(0)}%)`;
+}
+
+/* ---- formatting ---- */
+const fmtPrice = v => v === null ? dash : "$" + v.toFixed(2);
+const pctCell = v => {
+  if (v === null) return `<td class="mut">${dash}</td>`;
+  const up = v >= 0;
+  return `<td class="${up ? "up" : "down"}">${up ? "+" : ""}${v.toFixed(2)}%</td>`;
+};
+
+/* ---- normalise Twelve Data's response into {SYMBOL: bars[]} ---- */
+function parseSeries(json, tickers){
+  const out = {};
+  // Single-symbol requests return the series at top level (no symbol key).
+  const single = json && (json.values || json.status === "error" || json.meta);
+  for (const sym of tickers){
+    const node = single ? json : (json[sym] || {});
+    if (!node || node.status === "error" || !Array.isArray(node.values)){
+      out[sym] = null;
+      continue;
+    }
+    // Twelve Data returns newest-first; flip to chronological.
+    const bars = node.values
+      .map(v => ({ t: new Date(v.datetime).getTime(), c: Number(v.close) }))
+      .filter(b => Number.isFinite(b.c) && Number.isFinite(b.t))
+      .sort((a, b) => a.t - b.t);
+    out[sym] = bars.length ? bars : null;
+  }
+  return out;
+}
+
+/* ---- render one row ---- */
+function rowHTML(sym, bars){
+  if (!bars){
+    return `<tr><td class="l sym">${sym}</td>` +
+      `<td class="mut" colspan="4">no data — check the symbol</td></tr>`;
+  }
+  const price = bars[bars.length - 1].c;
+  const mom = (() => { const p = closeDaysAgo(bars, 30);  return p ? (price / p - 1) * 100 : null; })();
+  const yoy = (() => { const p = closeDaysAgo(bars, 365); return p ? (price / p - 1) * 100 : null; })();
+  const r = rsi(bars.map(b => b.c));
+  const rsiCell = r === null
+    ? `<td class="mut">${dash}</td>`
+    : `<td><span class="pill" style="background:${rsiColor(r)}">${r.toFixed(0)}</span></td>`;
+  return `<tr>` +
+    `<td class="l sym">${sym}</td>` +
+    `<td class="price">${fmtPrice(price)}</td>` +
+    pctCell(mom) + pctCell(yoy) + rsiCell +
+    `</tr>`;
+}
+
+/* ---- run on open ---- */
+(async function(){
+  const rowsEl = document.getElementById("rows");
+  const statusEl = document.getElementById("status");
+  const dot = document.getElementById("dot");
+
+  if (!TICKERS.length){
+    dot.className = "dot"; dot.style.background = "var(--down)";
+    statusEl.textContent = "No tickers specified";
+    document.getElementById("badge").innerHTML =
+      `<span class="badge">Add <b>?tickers=AAPL,MSFT,NVDA</b> to the URL</span>`;
+    return;
+  }
+
+  document.getElementById("title").textContent =
+    TICKERS.length > 1 ? `Watchlist (${TICKERS.length})` : TICKERS[0];
+
+  try{
+    const url = `https://api.twelvedata.com/time_series` +
+      `?symbol=${encodeURIComponent(TICKERS.join(","))}` +
+      `&interval=1week&outputsize=60&apikey=${KEY}`;
+    const json = await fetch(url).then(r => r.json());
+
+    // A whole-request failure (bad key / rate limit) surfaces as a top-level error.
+    if (json.status === "error" && !json.meta && !TICKERS.every(s => json[s])){
+      throw new Error(json.message || "request failed");
+    }
+
+    const series = parseSeries(json, TICKERS);
+    rowsEl.innerHTML = TICKERS.map(s => rowHTML(s, series[s])).join("");
+
+    const ok = TICKERS.filter(s => series[s]).length;
+    const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    dot.className = "dot live";
+    statusEl.textContent = `Live · ${ok}/${TICKERS.length} loaded · ${t}`;
+
+    if (TICKERS.length > 8){
+      document.getElementById("badge").innerHTML =
+        `<span class="badge">${TICKERS.length} tickers — Twelve Data free tier allows ~8 per minute; ` +
+        `some rows may be blank until the limit resets.</span>`;
+    }
+  }catch(err){
+    dot.className = "dot"; dot.style.background = "var(--down)";
+    statusEl.textContent = "Couldn't load data";
+    rowsEl.innerHTML =
+      `<tr class="skeleton"><td class="l" colspan="5">Couldn't load table — ${String(err.message || err)}</td></tr>`;
+  }
+})();
+</script>
+</body>
+</html>
