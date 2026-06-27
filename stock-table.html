@@ -34,8 +34,10 @@
   .up{color:var(--up)} .down{color:var(--down)} .mut{color:var(--sub)}
   .pill{display:inline-block;min-width:46px;padding:2px 8px;border-radius:999px;
     color:#fff;font-weight:700;font-size:12.5px;text-align:center}
-  .sig{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--up);
-    color:#fff;font-weight:700;font-size:11.5px;white-space:nowrap}
+  .sigcell{white-space:normal}
+  .sig{display:inline-block;padding:2px 8px;border-radius:999px;
+    color:#fff;font-weight:700;font-size:11.5px;white-space:nowrap;margin:1px 0 1px 4px}
+  .sig.bull{background:var(--up)} .sig.bear{background:var(--down)}
   .legend{margin-top:12px;font-size:11px;color:var(--sub);line-height:1.6}
   .swatch{display:inline-block;width:120px;height:8px;border-radius:4px;vertical-align:middle;
     margin:0 6px;background:linear-gradient(90deg,
@@ -71,8 +73,10 @@
       <b>RSI(14), weekly.</b> <span class="swatch"></span>
       &lt;30 oversold (green / buy zone) &middot; &gt;80 overbought (red / sell zone).
       Day / MoM / YoY are price change vs the previous close, ~1&nbsp;month and ~12&nbsp;months ago.
-      <br><b>Signal</b> flags <span class="sig">&#9650; Bull div</span> — regular bullish divergence: price made a
-      lower weekly swing low while RSI made a higher low (fading downside momentum). A heuristic, not a guarantee.
+      <br><b>Signal</b> stacks the TA we track — more pills = more confluence.
+      <span class="sig bull">&#9650; Bull div</span> price made a lower weekly swing low while RSI made a higher low (fading downside);
+      <span class="sig bear">&#9660; Bear div</span> price made a higher high while RSI made a lower high (fading upside).
+      Heuristics, not guarantees.
       <br>Twelve&nbsp;Data, daily candles (weekly RSI resampled) &middot; loaded in batches of 8 (free-tier limit) &middot; not investment advice.
     </div>
   </div>
@@ -129,17 +133,19 @@ function rsiSeries(closes, period = 14){
   return out;
 }
 
-// Indices of pivot lows: strictly lower than `span` neighbours on each side.
-function pivotLows(vals, span = 2){
+// Indices of pivots: strictly more extreme than `span` neighbours on each side.
+// dir = -1 for pivot lows, +1 for pivot highs.
+function pivots(vals, dir, span = 2){
   const idx = [];
   for (let i = span; i < vals.length - span; i++){
     if (vals[i] == null) continue;
-    let low = true;
+    let ok = true;
     for (let j = i - span; j <= i + span; j++){
       if (j === i) continue;
-      if (vals[j] == null || vals[j] <= vals[i]){ low = false; break; }
+      // for a low: neighbour must be > value; for a high: neighbour must be < value
+      if (vals[j] == null || dir * (vals[j] - vals[i]) <= 0){ ok = false; break; }
     }
-    if (low) idx.push(i);
+    if (ok) idx.push(i);
   }
   return idx;
 }
@@ -148,7 +154,7 @@ function pivotLows(vals, span = 2){
 // making a LOWER low while RSI makes a HIGHER low (fading downside momentum).
 // Conservative: latest low must be recent, lows sensibly spaced, RSI in lower half.
 function bullishDivergence(closes, rsiArr){
-  const lows = pivotLows(closes, 2);
+  const lows = pivots(closes, -1, 2);
   if (lows.length < 2) return false;
   const a = lows[lows.length - 2], b = lows[lows.length - 1];
   if (closes.length - 1 - b > 8) return false;     // latest swing low must be recent (~2 months)
@@ -158,6 +164,30 @@ function bullishDivergence(closes, rsiArr){
   return closes[b] < closes[a]      // lower low in price
       && rsiArr[b] > rsiArr[a]      // higher low in RSI
       && rsiArr[a] < 50;            // in the lower half, where it's meaningful
+}
+
+// Regular bearish divergence: the two most recent weekly swing highs show price
+// making a HIGHER high while RSI makes a LOWER high (fading upside momentum).
+function bearishDivergence(closes, rsiArr){
+  const highs = pivots(closes, +1, 2);
+  if (highs.length < 2) return false;
+  const a = highs[highs.length - 2], b = highs[highs.length - 1];
+  if (closes.length - 1 - b > 8) return false;     // latest swing high must be recent (~2 months)
+  const gap = b - a;
+  if (gap < 3 || gap > 30) return false;           // sensible spacing between the two highs
+  if (rsiArr[a] == null || rsiArr[b] == null) return false;
+  return closes[b] > closes[a]      // higher high in price
+      && rsiArr[b] < rsiArr[a]      // lower high in RSI
+      && rsiArr[a] > 50;            // in the upper half, where it's meaningful
+}
+
+// The stack of TA signals we track on a name. Add new detectors here and they
+// will accumulate as pills in the Signal column — more pills = more confluence.
+function signals(closes, rsiArr){
+  const out = [];
+  if (bullishDivergence(closes, rsiArr)) out.push({ label: "▲ Bull div", kind: "bull" });
+  if (bearishDivergence(closes, rsiArr)) out.push({ label: "▼ Bear div", kind: "bear" });
+  return out;
 }
 
 // Resample chronological daily bars to one close per ISO week (last close wins).
@@ -241,8 +271,9 @@ function rowCells(sym, bars){
   const rsiCell = (r == null)
     ? `<td class="mut">${dash}</td>`
     : `<td><span class="pill" style="background:${rsiColor(r)}">${r.toFixed(0)}</span></td>`;
-  const sigCell = bullishDivergence(wk, rs)
-    ? `<td><span class="sig">▲ Bull div</span></td>`
+  const sigs = signals(wk, rs);
+  const sigCell = sigs.length
+    ? `<td class="sigcell">${sigs.map(s => `<span class="sig ${s.kind}">${s.label}</span>`).join("")}</td>`
     : `<td class="mut">${dash}</td>`;
   return `<td class="l sym">${sym}</td>` +
     `<td class="price">${fmtPrice(price)}</td>` +
