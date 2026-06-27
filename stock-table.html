@@ -77,9 +77,9 @@
       <b>RSI(14), weekly.</b> <span class="swatch"></span>
       &lt;30 oversold (green / buy zone) &middot; &gt;80 overbought (red / sell zone).
       Day / MoM / YoY are price change vs the previous close, ~1&nbsp;month and ~12&nbsp;months ago.
-      <br><b>Bull signals:</b> <span class="sig bull">&#9650; Bull div</span>
-      <br><b>Bear signals:</b> <span class="sig bear">&#9660; Bear div</span>
-      <br>Solid = confirmed pivot &middot; hollow = developing (current week, may repaint).
+      <br><b>Bull signals:</b> <span class="sig bull">&#9650; Bull div</span> <span class="sig bull dev">&#9650; Bull div&middot;dev</span>
+      <br><b>Bear signals:</b> <span class="sig bear">&#9660; Bear div</span> <span class="sig bear dev">&#9660; Bear div&middot;dev</span>
+      <br>Solid = confirmed pivot &middot; hollow &ldquo;dev&rdquo; = developing (current week, may repaint).
       <br>Twelve&nbsp;Data, daily candles (weekly RSI resampled) &middot; loaded in batches of 8 (free-tier limit) &middot; not investment advice.
     </div>
   </div>
@@ -209,9 +209,9 @@ function divergence(closes, rsiArr, dir){
 function signals(closes, rsiArr){
   const out = [];
   const bull = divergence(closes, rsiArr, -1);
-  if (bull) out.push({ label: "▲ Bull div", kind: "bull", dev: bull.dev });
+  if (bull) out.push({ label: bull.dev ? "▲ Bull div·dev" : "▲ Bull div", kind: "bull", dev: bull.dev });
   const bear = divergence(closes, rsiArr, +1);
-  if (bear) out.push({ label: "▼ Bear div", kind: "bear", dev: bear.dev });
+  if (bear) out.push({ label: bear.dev ? "▼ Bear div·dev" : "▼ Bear div", kind: "bear", dev: bear.dev });
   return out;
 }
 
