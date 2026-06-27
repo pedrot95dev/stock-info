@@ -34,6 +34,8 @@
   .up{color:var(--up)} .down{color:var(--down)} .mut{color:var(--sub)}
   .pill{display:inline-block;min-width:46px;padding:2px 8px;border-radius:999px;
     color:#fff;font-weight:700;font-size:12.5px;text-align:center}
+  .sig{display:inline-block;padding:2px 8px;border-radius:999px;background:var(--up);
+    color:#fff;font-weight:700;font-size:11.5px;white-space:nowrap}
   .legend{margin-top:12px;font-size:11px;color:var(--sub);line-height:1.6}
   .swatch{display:inline-block;width:120px;height:8px;border-radius:4px;vertical-align:middle;
     margin:0 6px;background:linear-gradient(90deg,
@@ -59,6 +61,7 @@
           <th>MoM&nbsp;%</th>
           <th>YoY&nbsp;%</th>
           <th>Weekly&nbsp;RSI</th>
+          <th>Signal</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
@@ -68,6 +71,8 @@
       <b>RSI(14), weekly.</b> <span class="swatch"></span>
       &lt;30 oversold (green / buy zone) &middot; &gt;80 overbought (red / sell zone).
       Day / MoM / YoY are price change vs the previous close, ~1&nbsp;month and ~12&nbsp;months ago.
+      <br><b>Signal</b> flags <span class="sig">&#9650; Bull div</span> — regular bullish divergence: price made a
+      lower weekly swing low while RSI made a higher low (fading downside momentum). A heuristic, not a guarantee.
       <br>Twelve&nbsp;Data, daily candles (weekly RSI resampled) &middot; loaded in batches of 8 (free-tier limit) &middot; not investment advice.
     </div>
   </div>
@@ -104,22 +109,55 @@ const TICKERS = [...new Set(
 const dash = "—";
 
 /* ---- math ---- */
-// Wilder's RSI over an array of closes in chronological (oldest->newest) order.
-function rsi(closes, period = 14){
-  if (closes.length < period + 1) return null;
+// Wilder's RSI as a series aligned to `closes` (chronological). Early entries null.
+function rsiSeries(closes, period = 14){
+  const out = new Array(closes.length).fill(null);
+  if (closes.length < period + 1) return out;
   let gain = 0, loss = 0;
   for (let i = 1; i <= period; i++){
     const ch = closes[i] - closes[i - 1];
     if (ch >= 0) gain += ch; else loss -= ch;
   }
   let avgGain = gain / period, avgLoss = loss / period;
+  out[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
   for (let i = period + 1; i < closes.length; i++){
     const ch = closes[i] - closes[i - 1];
     avgGain = (avgGain * (period - 1) + (ch > 0 ? ch : 0)) / period;
     avgLoss = (avgLoss * (period - 1) + (ch < 0 ? -ch : 0)) / period;
+    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
   }
-  if (avgLoss === 0) return 100;
-  return 100 - 100 / (1 + avgGain / avgLoss);
+  return out;
+}
+
+// Indices of pivot lows: strictly lower than `span` neighbours on each side.
+function pivotLows(vals, span = 2){
+  const idx = [];
+  for (let i = span; i < vals.length - span; i++){
+    if (vals[i] == null) continue;
+    let low = true;
+    for (let j = i - span; j <= i + span; j++){
+      if (j === i) continue;
+      if (vals[j] == null || vals[j] <= vals[i]){ low = false; break; }
+    }
+    if (low) idx.push(i);
+  }
+  return idx;
+}
+
+// Regular bullish divergence: the two most recent weekly swing lows show price
+// making a LOWER low while RSI makes a HIGHER low (fading downside momentum).
+// Conservative: latest low must be recent, lows sensibly spaced, RSI in lower half.
+function bullishDivergence(closes, rsiArr){
+  const lows = pivotLows(closes, 2);
+  if (lows.length < 2) return false;
+  const a = lows[lows.length - 2], b = lows[lows.length - 1];
+  if (closes.length - 1 - b > 8) return false;     // latest swing low must be recent (~2 months)
+  const gap = b - a;
+  if (gap < 3 || gap > 30) return false;           // sensible spacing between the two lows
+  if (rsiArr[a] == null || rsiArr[b] == null) return false;
+  return closes[b] < closes[a]      // lower low in price
+      && rsiArr[b] > rsiArr[a]      // higher low in RSI
+      && rsiArr[a] < 50;            // in the lower half, where it's meaningful
 }
 
 // Resample chronological daily bars to one close per ISO week (last close wins).
@@ -191,19 +229,24 @@ function parseSeries(json, tickers){
 function rowCells(sym, bars){
   if (!bars){
     return `<td class="l sym">${sym}</td>` +
-      `<td class="mut" colspan="5">no data — check the symbol</td>`;
+      `<td class="mut" colspan="6">no data — check the symbol</td>`;
   }
   const price = bars[bars.length - 1].c;
   const day = bars.length > 1 ? (price / bars[bars.length - 2].c - 1) * 100 : null;
   const mom = (() => { const p = closeDaysAgo(bars, 30);  return p ? (price / p - 1) * 100 : null; })();
   const yoy = (() => { const p = closeDaysAgo(bars, 365); return p ? (price / p - 1) * 100 : null; })();
-  const r = rsi(toWeekly(bars));
-  const rsiCell = r === null
+  const wk = toWeekly(bars);
+  const rs = rsiSeries(wk);
+  const r = rs[rs.length - 1];
+  const rsiCell = (r == null)
     ? `<td class="mut">${dash}</td>`
     : `<td><span class="pill" style="background:${rsiColor(r)}">${r.toFixed(0)}</span></td>`;
+  const sigCell = bullishDivergence(wk, rs)
+    ? `<td><span class="sig">▲ Bull div</span></td>`
+    : `<td class="mut">${dash}</td>`;
   return `<td class="l sym">${sym}</td>` +
     `<td class="price">${fmtPrice(price)}</td>` +
-    pctCell(day) + pctCell(mom) + pctCell(yoy) + rsiCell;
+    pctCell(day) + pctCell(mom) + pctCell(yoy) + rsiCell + sigCell;
 }
 
 /* ---- rate-limit plumbing ---- */
@@ -275,7 +318,7 @@ async function loadChunk(syms, idxBase){
   // Lay down a stable, ordered row per ticker; fill each in as its batch lands.
   rowsEl.innerHTML = TICKERS.map((s, i) =>
     `<tr id="row-${i}" class="skeleton"><td class="l sym">${s}</td>` +
-    `<td class="mut" colspan="5">loading…</td></tr>`).join("");
+    `<td class="mut" colspan="6">loading…</td></tr>`).join("");
 
   // Split into batches of 8 and load them one after another.
   const chunks = [];
