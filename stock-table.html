@@ -66,7 +66,7 @@
       <b>RSI(14), weekly.</b> <span class="swatch"></span>
       &lt;30 oversold (green / buy zone) &middot; &gt;70 overbought (red / sell zone).
       MoM &amp; YoY are price change vs ~1&nbsp;month and ~12&nbsp;months ago.
-      <br>One Twelve&nbsp;Data request &middot; pulled on page open &middot; not investment advice.
+      <br>Twelve&nbsp;Data, weekly candles &middot; loaded in batches of 8 (free-tier limit) &middot; not investment advice.
     </div>
   </div>
 
@@ -164,11 +164,11 @@ function parseSeries(json, tickers){
   return out;
 }
 
-/* ---- render one row ---- */
-function rowHTML(sym, bars){
+/* ---- render the cells of one row (the <tr id> wrapper persists) ---- */
+function rowCells(sym, bars){
   if (!bars){
-    return `<tr><td class="l sym">${sym}</td>` +
-      `<td class="mut" colspan="4">no data — check the symbol</td></tr>`;
+    return `<td class="l sym">${sym}</td>` +
+      `<td class="mut" colspan="4">no data — check the symbol</td>`;
   }
   const price = bars[bars.length - 1].c;
   const mom = (() => { const p = closeDaysAgo(bars, 30);  return p ? (price / p - 1) * 100 : null; })();
@@ -177,19 +177,66 @@ function rowHTML(sym, bars){
   const rsiCell = r === null
     ? `<td class="mut">${dash}</td>`
     : `<td><span class="pill" style="background:${rsiColor(r)}">${r.toFixed(0)}</span></td>`;
-  return `<tr>` +
-    `<td class="l sym">${sym}</td>` +
+  return `<td class="l sym">${sym}</td>` +
     `<td class="price">${fmtPrice(price)}</td>` +
-    pctCell(mom) + pctCell(yoy) + rsiCell +
-    `</tr>`;
+    pctCell(mom) + pctCell(yoy) + rsiCell;
+}
+
+/* ---- rate-limit plumbing ---- */
+const CHUNK = 8;            // Twelve Data free tier: 8 credits/min, 1 per symbol
+const COOLDOWN = 65;       // seconds to wait when out of credits (a touch over a minute)
+const rowsEl = document.getElementById("rows");
+const statusEl = document.getElementById("status");
+const dot = document.getElementById("dot");
+let loaded = 0;
+
+const isRateLimited = j =>
+  j && (j.code === 429 ||
+       (j.status === "error" && /credit|limit|run out|429/i.test(j.message || "")));
+
+// Pause `sec` seconds, showing a live countdown in the status line.
+function cooldown(sec, label){
+  return new Promise(res => {
+    let left = sec;
+    const tick = () => statusEl.textContent = `${label} — retrying in ${left}s`;
+    tick();
+    const id = setInterval(() => {
+      left -= 1;
+      if (left <= 0){ clearInterval(id); res(); } else tick();
+    }, 1000);
+  });
+}
+
+// Fetch one batch (≤8 symbols). Returns parsed series, or null if rate-limited.
+async function fetchChunk(syms){
+  const url = `https://api.twelvedata.com/time_series` +
+    `?symbol=${encodeURIComponent(syms.join(","))}` +
+    `&interval=1week&outputsize=60&apikey=${KEY}`;
+  const json = await fetch(url).then(r => r.json());
+  if (isRateLimited(json)) return null;
+  if (json.status === "error" && !json.meta && !syms.every(s => json[s])){
+    throw new Error(json.message || "request failed");
+  }
+  return parseSeries(json, syms);
+}
+
+// Load one batch, retrying on its own 60s cycle until the rate limit clears.
+async function loadChunk(syms, idxBase){
+  while (true){
+    const series = await fetchChunk(syms);          // throws only on hard errors
+    if (series){
+      syms.forEach((s, k) => {
+        document.getElementById(`row-${idxBase + k}`).innerHTML = rowCells(s, series[s]);
+        if (series[s]) loaded += 1;
+      });
+      return;
+    }
+    await cooldown(COOLDOWN, `Rate limit (${loaded}/${TICKERS.length} loaded)`);
+  }
 }
 
 /* ---- run on open ---- */
 (async function(){
-  const rowsEl = document.getElementById("rows");
-  const statusEl = document.getElementById("status");
-  const dot = document.getElementById("dot");
-
   if (!TICKERS.length){
     dot.className = "dot"; dot.style.background = "var(--down)";
     statusEl.textContent = "No tickers specified";
@@ -201,35 +248,37 @@ function rowHTML(sym, bars){
   document.getElementById("title").textContent =
     TICKERS.length > 1 ? `Watchlist (${TICKERS.length})` : TICKERS[0];
 
+  // Lay down a stable, ordered row per ticker; fill each in as its batch lands.
+  rowsEl.innerHTML = TICKERS.map((s, i) =>
+    `<tr id="row-${i}" class="skeleton"><td class="l sym">${s}</td>` +
+    `<td class="mut" colspan="4">loading…</td></tr>`).join("");
+
+  // Split into batches of 8 and load them one after another.
+  const chunks = [];
+  for (let i = 0; i < TICKERS.length; i += CHUNK) chunks.push(i);
+
+  if (TICKERS.length > CHUNK){
+    document.getElementById("badge").innerHTML =
+      `<span class="badge">${TICKERS.length} tickers — loading in batches of ${CHUNK} ` +
+      `(free-tier limit); later rows fill in ~${COOLDOWN}s apart.</span>`;
+  }
+
   try{
-    const url = `https://api.twelvedata.com/time_series` +
-      `?symbol=${encodeURIComponent(TICKERS.join(","))}` +
-      `&interval=1week&outputsize=60&apikey=${KEY}`;
-    const json = await fetch(url).then(r => r.json());
+    for (let c = 0; c < chunks.length; c++){
+      const idxBase = chunks[c];
+      // First batch is free; pre-empt the inevitable 429 before each later batch.
+      if (c > 0) await cooldown(COOLDOWN, `Batch ${c + 1}/${chunks.length} (${loaded}/${TICKERS.length} loaded)`);
+      await loadChunk(TICKERS.slice(idxBase, idxBase + CHUNK), idxBase);
 
-    // A whole-request failure (bad key / rate limit) surfaces as a top-level error.
-    if (json.status === "error" && !json.meta && !TICKERS.every(s => json[s])){
-      throw new Error(json.message || "request failed");
-    }
-
-    const series = parseSeries(json, TICKERS);
-    rowsEl.innerHTML = TICKERS.map(s => rowHTML(s, series[s])).join("");
-
-    const ok = TICKERS.filter(s => series[s]).length;
-    const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    dot.className = "dot live";
-    statusEl.textContent = `Live · ${ok}/${TICKERS.length} loaded · ${t}`;
-
-    if (TICKERS.length > 8){
-      document.getElementById("badge").innerHTML =
-        `<span class="badge">${TICKERS.length} tickers — Twelve Data free tier allows ~8 per minute; ` +
-        `some rows may be blank until the limit resets.</span>`;
+      const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      dot.className = "dot live";
+      statusEl.textContent = `Live · ${loaded}/${TICKERS.length} loaded · ${t}`;
     }
   }catch(err){
     dot.className = "dot"; dot.style.background = "var(--down)";
     statusEl.textContent = "Couldn't load data";
-    rowsEl.innerHTML =
-      `<tr class="skeleton"><td class="l" colspan="5">Couldn't load table — ${String(err.message || err)}</td></tr>`;
+    document.getElementById("badge").innerHTML =
+      `<span class="badge">Couldn't load table — ${String(err.message || err)}</span>`;
   }
 })();
 </script>
